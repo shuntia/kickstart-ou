@@ -1,0 +1,21 @@
+[package]
+name = "kickstart-ou"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dirs = "6.0.0"
+eframe = { version = "0.34.3", features = ["persistence"] }
+egui = "0.34.3"
+notify-rust = "4.18.0"
+os_info = "3.15.0"
+parselnk = "0.1.1"
+reqwest = { version = "0.13.4", features = ["blocking"] }
+rfd = "0.17.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+zip = "8.6.0"
+
+# Creating Windows .lnk shortcuts is Windows-only; keep it off the host build.
+[target.'cfg(windows)'.dependencies]
+mslnk = "0.1.8"
