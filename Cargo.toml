@@ -7,14 +7,19 @@ edition = "2024"
 ar = "0.9.0"
 dirs = "7.0.0"
 eframe = "0.37.0"
+encoding_rs = "0.8.44"
+image = "0.25.10"
 parselnk = "0.1.1"
 reqwest = { version = "0.13.5", features = ["blocking", "multipart"] }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
+serde-java-properties = "0.2.0"
 serde_json = "1.0.154"
+tar = "0.4.46"
+yaml_serde = "0.10.7"
 zip = "9.3.0"
+zstd = "0.14.3"
 
-# Creating Windows .lnk shortcuts is Windows-only; keep it off the host build.
 [target."cfg(windows)".dependencies]
 mslnk = "0.1.8"
 

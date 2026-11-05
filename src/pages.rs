@@ -1,71 +1,92 @@
 use std::{
     env::home_dir,
+    error::Error,
     fs, io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{self, Command},
+    time::Instant,
 };
 
 use eframe::egui::{self, Color32, RichText, Ui};
+use encoding_rs::SHIFT_JIS;
 
-use crate::{Kickstart, RsState, install, otoini};
+use crate::{CharacterTxt, CharacterYaml, Kickstart, RsState, install, otoini};
 
 #[cfg(feature = "include_zip")]
 const HELLO_UTAU_ZIP: &[u8] = include_bytes!("../Hello UTAU World!_v111.zip");
 
-static TABLE_OF_CONTENTS: &[&str] = &["はじめに", "目次"];
+pub type PageResult = Result<(), Box<dyn Error>>;
+type PageFn = fn(&mut Kickstart, &mut Ui) -> PageResult;
 
-pub const PAGES: &[fn(&mut Kickstart, &mut Ui)] = &[
-    Kickstart::intro,
-    Kickstart::toc,
-    Kickstart::requirements,
-    Kickstart::openutau_setup,
-    Kickstart::tools_setup,
-    Kickstart::huw_extract,
-    Kickstart::launch_recstar,
-    Kickstart::recstar_howto,
-    Kickstart::environment,
-    Kickstart::recording,
-    Kickstart::move_session,
-    Kickstart::auto_oto,
+/// Every page with its table-of-contents title, in order.
+pub const PAGES: &[(&str, PageFn)] = &[
+    ("はじめに", Kickstart::intro),
+    ("目次", Kickstart::toc),
+    ("必要なもの", Kickstart::requirements),
+    ("OpenUtauの初期設定", Kickstart::openutau_setup),
+    ("録音・原音設定ソフトの初期設定", Kickstart::tools_setup),
+    ("Hello UTAU Worldの解凍", Kickstart::huw_extract),
+    ("録音ソフトの起動", Kickstart::launch_recstar),
+    ("RecStarの使い方", Kickstart::recstar_howto),
+    ("収録環境", Kickstart::environment),
+    ("収録", Kickstart::recording),
+    ("vLabelerの下準備", Kickstart::move_session),
+    ("自動原音設定", Kickstart::auto_oto),
+    ("原音設定", Kickstart::label),
+    ("音源情報", Kickstart::information),
+    ("音源テスト", Kickstart::testing),
+    ("パッケージング", Kickstart::packaging_and_install),
+    ("おわりに", Kickstart::end),
 ];
 
 impl Kickstart {
-    fn intro(&mut self, ui: &mut Ui) {
+    fn intro(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("このソフトは自動でUTAUのボイスバンクを作る補助をするソフトです。\n基本的にはUTAU音源制作Wikiの内情に沿っています。早速右下の「次へ」をクリックして進みましょう！");
         ui.hyperlink_to(
             "参考：UTAU音源制作Wikiの元記事",
             "https://w.atwiki.jp/vbmaker/pages/43.html",
         );
+        Ok(())
     }
 
-    fn toc(&mut self, ui: &mut Ui) {
-        ui.label("目次");
-        for (i, title) in TABLE_OF_CONTENTS.iter().enumerate() {
-            if ui.button(*title).clicked() {
+    fn toc(&mut self, ui: &mut Ui) -> PageResult {
+        ui.heading("目次");
+        ui.separator();
+        for (i, (title, _)) in PAGES.iter().enumerate() {
+            if ui.link(format!("{}. {title}", i + 1)).clicked() {
                 self.state.page = i as u32;
             }
         }
+        Ok(())
     }
 
-    fn requirements(&mut self, ui: &mut Ui) {
+    fn requirements(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("必要なもの");
         ui.separator();
-        ui.label("- パソコン(Windows)");
+        ui.label("- パソコン(Windows / Linux)");
         ui.label("- マイク、オーディオインターフェースなどの録音機材");
         ui.hyperlink_to("→詳細", "https://w.atwiki.jp/vbmaker/pages/14.html");
         ui.label("- 収録環境");
         ui.label("録音、原音設定、調声のソフトは自動でインストールされます。");
+        Ok(())
     }
 
-    fn openutau_setup(&mut self, ui: &mut Ui) {
+    fn openutau_setup(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("データの初期設定");
-        ui.label("このソフトは全て管理して最小限で自動インストールすることができますが、OpenUtau公式のインストーラを使用しますか？");
-        ui.radio_value(&mut self.state.use_openutau_installer, true, "はい");
-        ui.radio_value(&mut self.state.use_openutau_installer, false, "いいえ");
+        #[cfg(windows)]
+        {
+            ui.label("このソフトは全て管理して最小限で自動インストールすることができますが、OpenUtau公式のインストーラを使用しますか？");
+            ui.radio_value(
+                &mut self.state.use_openutau_installer,
+                false,
+                "いいえ(推奨)",
+            );
+            ui.radio_value(&mut self.state.use_openutau_installer, true, "はい");
+        }
 
         // poll_jobs shows progress while installing.
         if self.ou_install.is_some() {
-            return;
+            return Ok(());
         }
         if self.state.ou_singer_dir.is_some() {
             ui.separator();
@@ -76,59 +97,65 @@ impl Kickstart {
             if let Some(dir) = &self.state.ou_singer_dir {
                 ui.label(format!("音源フォルダ: {}", dir.display()));
             }
-            return;
+            return Ok(());
         }
 
         #[cfg(windows)]
-        {
-            if self.state.use_openutau_installer {
-                ui.label("OpenUtau公式のインストーラをダウンロードします。よろしいですか？");
-                if ui.button("はい").clicked() {
-                    self.install_error = None;
-                    self.ou_install = Some(install::win::ou_installer());
-                }
-            } else {
-                let default_dir = home_dir().unwrap_or_default().join("OpenUtau");
-                let dest = self.state.ou_dir.clone().unwrap_or(default_dir);
-                ui.label("OpenUtauのポータブル版をインストールする場所を指定してください。");
-                ui.label(format!("インストール先: {}", dest.display()));
-                ui.horizontal(|ui| {
-                    if ui.button("フォルダを選択").clicked()
-                        && let Some(path) = rfd::FileDialog::new()
-                            .set_directory(dest.parent().unwrap_or(&dest))
-                            .pick_folder()
-                    {
-                        self.state.ou_dir = Some(path);
-                    }
-                    if ui.button("インストール開始").clicked() {
-                        self.install_error = None;
-                        self.state.ou_dir = Some(dest.clone());
-                        self.ou_install = Some(install::win::portable_install(dest.clone()));
-                    }
-                });
+        if self.state.use_openutau_installer {
+            ui.label("OpenUtau公式のインストーラをダウンロードします。よろしいですか？");
+            if ui.button("はい").clicked() {
+                self.install_error = None;
+                self.ou_install = Some(install::win::ou_installer());
             }
+            return Ok(());
         }
 
-        #[cfg(not(windows))]
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            let default_dir = home_dir().unwrap_or_default().join("OpenUtau");
+            let dest = self.state.ou_dir.clone().unwrap_or(default_dir);
+            ui.label("OpenUtauのポータブル版をインストールする場所を指定してください。");
+            ui.label(format!("インストール先: {}", dest.display()));
+            ui.horizontal(|ui| {
+                if ui.button("フォルダを選択").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_directory(dest.parent().unwrap_or(&dest))
+                        .pick_folder()
+                {
+                    self.state.ou_dir = Some(path);
+                }
+                if ui.button("インストール開始").clicked() {
+                    self.install_error = None;
+                    self.state.ou_dir = Some(dest.clone());
+                    self.ou_install = Some(install::portable_install(dest.clone()));
+                }
+            });
+        }
+
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             ui.label("Linuxの場合はディストロに応じた方法でOpenUtauをインストールしてください。インストール後、OpenUtauの実行ファイルと音源フォルダの場所を入力してください。");
             if ui.button("インストール完了").clicked() {
                 match Command::new("which").arg("openutau").output() {
                     Ok(out) if out.status.success() => {
                         let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                        self.success_message =
+                            Some((format!("OpenUtauが見つかりました: {path}"), Instant::now()));
                         self.state.ou_dir = Some(path.into());
                     }
                     _ => {
-                        self.install_error = Some(
+                        self.install_error = Some((
                             "システムのPATHにOpenUtauが見つかりませんでした。必要無い、又は既にインストールされている場合は無視しても大丈夫です。".into(),
-                        );
+                            Instant::now(),
+                        ));
                     }
                 }
             }
         }
+        Ok(())
     }
 
-    fn tools_setup(&mut self, ui: &mut Ui) {
+    fn tools_setup(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("録音・原音設定ソフトの初期設定");
         ui.label("このソフトはRecStar及びvLabelerを使用します。");
         ui.label("RecStarは録音ソフト、vLabelerは原音設定ソフトです。");
@@ -151,14 +178,15 @@ impl Kickstart {
         if self.state.vl_installed && self.state.rs_installed {
             ui.label("初期設定が完了しました。次に進んで下さい。");
         }
+        Ok(())
     }
 
-    fn huw_extract(&mut self, ui: &mut Ui) {
+    fn huw_extract(&mut self, ui: &mut Ui) -> PageResult {
         ui.label(RichText::new("Hello UTAU Worldを解凍する").size(20.));
         ui.label("こちらのファイルは特別な許諾を得て配布されているデータです。解凍されたデータの再配布は禁止されています。");
         // dest exists mid-extraction, so check the job first.
         if self.huw_job.is_some() {
-            return;
+            return Ok(());
         }
         let dest = self.huw_dir();
         if dest.exists() {
@@ -166,7 +194,7 @@ impl Kickstart {
                 "Hello UTAU Worldは解凍済みです。次に進んでください: {}",
                 dest.display()
             ));
-            return;
+            return Ok(());
         }
         #[cfg(feature = "include_zip")]
         if ui.button("Hello UTAU Worldを解凍する").clicked() {
@@ -182,26 +210,30 @@ impl Kickstart {
                 Ok(install::InstallResult::Huw)
             }));
         }
+        Ok(())
     }
 
-    fn launch_recstar(&mut self, ui: &mut Ui) {
+    fn launch_recstar(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("録音しよう");
         ui.label("では、早速録音をはじめましょう！下のボタンを押すと録音ソフトが起動します。");
         if ui.button("録音ソフトを起動する").clicked() {
-            let recstar_path = self.state.data_dir.join("recstar").join("RecStar.exe");
-            self.install_error = if !recstar_path.exists() {
+            let recstar_path = install::app_exe(&self.state.data_dir.join("recstar"), "RecStar");
+            let err = if !recstar_path.exists() {
                 Some("RecStarが見つかりませんでした。RecStarの初期設定を行ってください。".into())
             } else if let Err(e) = Command::new(&recstar_path).spawn() {
                 Some(format!(
                     "録音ソフトの起動に失敗しました: {e}\nRecStarを手動で起動して録音してください。"
                 ))
             } else {
+                self.success_message = Some(("録音ソフトを起動しました。".into(), Instant::now()));
                 None
             };
+            self.install_error = err.map(|e| (e, Instant::now()));
         }
+        Ok(())
     }
 
-    fn recstar_howto(&mut self, ui: &mut Ui) {
+    fn recstar_howto(&mut self, ui: &mut Ui) -> PageResult {
         let huw = self.huw_dir();
         ui.heading("RecStarの使い方");
         ui.label(r#" ① 起動したらまず、連続録音モードにします。
@@ -232,23 +264,26 @@ impl Kickstart {
                 .display()
         ));
         ui.label("終わりましたら、いよいよ収録開始しましょう！");
+        Ok(())
     }
 
-    fn environment(&mut self, ui: &mut Ui) {
+    fn environment(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("収録環境");
         ui.label("反響や雑音をできるだけ取り除く方法を紹介します。");
         ui.label("得に気にしない方は飛ばしていただいて大丈夫です。");
         ui.separator();
         ui.label("TODO!");
+        Ok(())
     }
 
-    fn recording(&mut self, ui: &mut Ui) {
+    fn recording(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("いよいよ収録です！");
         ui.label("◎みたいなボタンを押して収録です！グッドラック！");
         ui.label("終わったら次へを押して下さい。次は原音設定です！");
+        Ok(())
     }
 
-    fn move_session(&mut self, ui: &mut Ui) {
+    fn move_session(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("vLabelerの下準備");
         ui.label("収録終了おめでとうございます！こちらでデータの移動をしておきます！");
         ui.separator();
@@ -272,7 +307,19 @@ impl Kickstart {
             RsState::Listed(ref l) => {
                 ui.label("RecStarのセッションフォルダを選択してください。");
                 for i in l {
-                    if ui.label(i.to_str().unwrap()).clicked() {
+                    if ui
+                        .radio(
+                            if let RsState::Selected(ref p) = self.recstar_state
+                                && p == i
+                            {
+                                true
+                            } else {
+                                false
+                            },
+                            i.display().to_string(),
+                        )
+                        .clicked()
+                    {
                         self.recstar_state = RsState::Selected(i.clone());
                         break;
                     }
@@ -297,14 +344,15 @@ impl Kickstart {
             RsState::Moved(ref p) => {
                 ui.label(format!(
                     "データの移動に成功しました。移動先:{}",
-                    p.to_str().unwrap()
+                    p.display()
                 ));
                 ui.label("次に移動しましょう！");
             }
         }
+        Ok(())
     }
 
-    fn auto_oto(&mut self, ui: &mut Ui) {
+    fn auto_oto(&mut self, ui: &mut Ui) -> PageResult {
         ui.heading("自動原音設定");
         ui.label("収録した音声をサーバーに送り、oto.iniの下書きを自動で作成する事ができます。");
         ui.label("情報収集・AI学習には利用されませんが、AIを利用した自動原音設定になります。");
@@ -316,7 +364,7 @@ impl Kickstart {
                 RichText::new("収録データが見つかりません。前のページでデータを移動してください。")
                     .color(Color32::RED),
             );
-            return;
+            return Ok(());
         }
         ui.add_enabled_ui(self.oto_job.is_none(), |ui| {
             ui.horizontal(|ui| {
@@ -336,7 +384,7 @@ impl Kickstart {
             ui.label("次に進みましょう！");
         }
         if self.oto_job.is_some() {
-            return;
+            return Ok(());
         }
         let ready =
             !self.state.otoini_url.trim().is_empty() && !self.state.otoini_token.trim().is_empty();
@@ -354,6 +402,315 @@ impl Kickstart {
                 otoini::run(&url, &token, &session, &dest, progress)
             }));
         }
+        Ok(())
+    }
+
+    fn label(&mut self, ui: &mut Ui) -> PageResult {
+        ui.heading("原音設定に移りましょう！");
+        ui.label("これからvLabelerを使って原音設定を行います。");
+        if ui.button("vLabelerを起動する").clicked() {
+            let vl_path = install::app_exe(&self.state.data_dir.join("vlabeler"), "vLabeler");
+            let err = if !vl_path.exists() {
+                Some("vLabelerが見つかりませんでした。vLabelerの初期設定を行ってください。".into())
+            } else if let Err(e) = Command::new(&vl_path).spawn() {
+                Some(format!(
+                    "原音設定ソフトの起動に失敗しました: {e}\nvLabelerを手動で起動して原音設定してください。"
+                ))
+            } else {
+                self.success_message =
+                    Some(("原音設定ソフトを起動しました。".into(), Instant::now()));
+                None
+            };
+            self.install_error = err.map(|e| (e, Instant::now()));
+        }
+        ui.label("原音設定理論は複雑すぎてここでは説明しきれません。詳しくはUTAU音源制作Wikiをご覧ください。");
+        ui.hyperlink_to(
+            "UTAU原音設定基礎理論",
+            "https://w.atwiki.jp/vbmaker/pages/17.html",
+        );
+        ui.label("このソフトでの完全解説は準備中です。乞うご期待！");
+        ui.label("原音設定が完了したら、次に進んでください。いよいよパッケージングです！");
+        Ok(())
+    }
+
+    fn information(&mut self, ui: &mut Ui) -> PageResult {
+        ui.heading("パッケージング");
+        ui.label("原音設定が完了したら、音源をパッケージングして配布できるようにします。");
+        // version, name, en_us_localized, readme, author, singer, web, icon, bg, portrait opacity,
+        // portrait height
+        ui.horizontal(|ui| {
+            ui.label("バージョン");
+            ui.text_edit_singleline(&mut self.state.package_data.version);
+        });
+        ui.horizontal(|ui| {
+            ui.label("名前");
+            ui.text_edit_singleline(&mut self.state.package_data.name);
+        });
+        ui.horizontal(|ui| {
+            ui.label("英語名");
+            ui.text_edit_singleline(&mut self.state.package_data.en_us_localized);
+        });
+        ui.horizontal(|ui| {
+            ui.label("作者");
+            ui.text_edit_singleline(&mut self.state.package_data.author);
+        });
+        ui.horizontal(|ui| {
+            ui.label("声優");
+            ui.text_edit_singleline(&mut self.state.package_data.voice);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Webサイト");
+            ui.text_edit_singleline(&mut self.state.package_data.web);
+        });
+        ui.horizontal(|ui| {
+            ui.label("アイコン");
+            if ui.button("選択").clicked()
+                && let Some(path) = rfd::FileDialog::new().pick_file()
+            {
+                self.state.package_data.icon_path = Some(path);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("立ち絵");
+            if ui.button("選択").clicked()
+                && let Some(path) = rfd::FileDialog::new().pick_file()
+            {
+                self.state.package_data.bg_path = Some(path);
+            }
+        });
+        ui.label("詳細");
+        ui.text_edit_multiline(&mut self.state.package_data.readme);
+        ui.collapsing("立ち絵の詳細", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("不透明度");
+                ui.add(egui::Slider::new(
+                    &mut self.state.package_data.portrait_opacity,
+                    0.0..=1.0,
+                ));
+            });
+            ui.horizontal(|ui| {
+                ui.label("高さ(そのままの場合は0)");
+                ui.add(
+                    egui::DragValue::new(&mut self.state.package_data.portrait_height).speed(1.0),
+                );
+            });
+        });
+        if ui.button("書き込み").clicked() {
+            let dir = self
+                .state
+                .proj_dir
+                .as_ref()
+                .ok_or("収録データの移動先が未設定です。")?;
+            let pkg = &mut self.state.package_data;
+            if let Some(icon) = &pkg.icon_path {
+                let name = icon
+                    .file_name()
+                    .ok_or("アイコンのパスが親ディレクトリで終わっています")?;
+                let dest = dir.join(name).with_extension("bmp");
+                // Already converted on an earlier click: copying onto itself would empty it.
+                if *icon != dest {
+                    if icon
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("bmp"))
+                    {
+                        fs::copy(icon, &dest)?;
+                    } else {
+                        image::open(icon)?.save_with_format(&dest, image::ImageFormat::Bmp)?;
+                    }
+                }
+                pkg.icon_path = Some(dest);
+            }
+            if let Some(bg) = &pkg.bg_path
+                && !bg.starts_with(dir)
+            {
+                let name = bg
+                    .file_name()
+                    .ok_or("立ち絵のパスが親ディレクトリで終わっています")?;
+                let dest = dir.join(name);
+                fs::copy(bg, &dest)?;
+                pkg.bg_path = Some(dest);
+            }
+            // The character files want paths relative to the voicebank root.
+            let mut rel = pkg.clone();
+            for p in [&mut rel.icon_path, &mut rel.bg_path].into_iter().flatten() {
+                *p = p.strip_prefix(dir)?.to_path_buf();
+            }
+            fs::write(
+                dir.join("character.txt"),
+                SHIFT_JIS
+                    .encode(&serde_java_properties::to_string(&CharacterTxt::from(
+                        rel.clone(),
+                    ))?)
+                    .0,
+            )?;
+            if !rel.readme.trim().is_empty() {
+                // UTAU shows readme.txt as Shift_JIS with CRLF line endings.
+                let readme = rel.readme.replace("\r\n", "\n").replace('\n', "\r\n");
+                fs::write(dir.join("readme.txt"), SHIFT_JIS.encode(&readme).0)?;
+            }
+            // OpenUtau reads character.yaml as UTF-8.
+            fs::write(
+                dir.join("character.yaml"),
+                yaml_serde::to_string(&CharacterYaml::from(rel))?,
+            )?;
+            self.success_message = Some((
+                "character.txt等の書き込みに成功しました。".into(),
+                Instant::now(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn testing(&mut self, ui: &mut Ui) -> PageResult {
+        ui.heading("音源テスト");
+        if ui.button("OpenUtauにインストールする").clicked() {
+            let dir = self
+                .state
+                .proj_dir
+                .as_ref()
+                .ok_or("収録データの移動先が未設定です。")?;
+            let ou_dir = self.state.ou_singer_dir.as_ref().ok_or(
+                "OpenUtauの音源フォルダが未設定です。OpenUtauの初期設定を行ってください。",
+            )?;
+            // Exactly one plain folder name, or remove_dir_all below could hit the whole
+            // Singers folder ("") or escape it ("../x").
+            let name = self.state.package_data.name.trim();
+            let mut parts = Path::new(name).components();
+            if !matches!(
+                (parts.next(), parts.next()),
+                (Some(std::path::Component::Normal(_)), None)
+            ) {
+                return Err("音源の名前が空か、フォルダ名として使えません。音源情報のページで名前を設定してください。".into());
+            }
+            let dest = ou_dir.join(name);
+            if dest.exists() {
+                fs::remove_dir_all(&dest)?;
+            }
+            copy_dir_all(dir, &dest)?;
+            self.success_message = Some((
+                format!("OpenUtauにインストールしました: {}", dest.display()),
+                Instant::now(),
+            ));
+            self.state.installed_to_ou = true;
+        }
+        if self.state.installed_to_ou {
+            ui.label("OpenUtauにインストール済みです。テストしてみましょう！");
+            if ui.button("OpenUtauを起動する").clicked() {
+                let ou_path = self.state.ou_dir.as_ref().ok_or(
+                    "OpenUtauの実行ファイルが未設定です。OpenUtauの初期設定を行ってください。",
+                )?;
+                // ou_dir is the install folder (Windows/Linux) or the binary itself (`which`).
+                let exe = if ou_path.is_dir() {
+                    ou_path.join(if cfg!(windows) {
+                        "OpenUtau.exe"
+                    } else {
+                        "OpenUtau.AppImage"
+                    })
+                } else {
+                    ou_path.clone()
+                };
+                if let Err(e) = Command::new(&exe)
+                    .arg(self.huw_dir().join("テスト歌唱用データ/TEST.ustx"))
+                    .spawn()
+                {
+                    self.install_error =
+                        Some((format!("OpenUtauの起動に失敗しました: {e}"), Instant::now()));
+                } else {
+                    self.success_message =
+                        Some(("OpenUtauを起動しました。".into(), Instant::now()));
+                }
+            }
+            ui.add_space(10.0);
+            ui.label(format!(
+                "OpenUtauで {} のシンガーを選択して、スペースキーで再生してみましょう！",
+                self.state.package_data.name
+            ));
+        }
+        Ok(())
+    }
+
+    fn packaging_and_install(&mut self, ui: &mut Ui) -> PageResult {
+        ui.heading("パッケージングとインストール");
+        ui.label("音源の情報をまとたら、zipに圧縮したり、そのままOpenUtauにインストールすることができます。");
+        if self.pkg_job.is_none() && ui.button("zipで書き出し").clicked() {
+            let dir = self
+                .state
+                .proj_dir
+                .clone()
+                .ok_or("収録データの移動先が未設定です。")?;
+            let name = match self.state.package_data.name.trim() {
+                "" => "voicebank".to_owned(),
+                n => n.to_owned(),
+            };
+            if let Some(dest) = rfd::FileDialog::new()
+                .set_file_name(format!("{name}.zip"))
+                .add_filter("zip", &["zip"])
+                .save_file()
+            {
+                self.install_error = None;
+                self.pkg_job = Some(install::spawn_job(move |progress| {
+                    install::set_progress(progress, "音源をzipに圧縮しています...", None);
+                    let install_txt = format!(
+                        "type=voiceset\r\nfolder={name}\r\ncontentsdir={name}\r\ndescription={name}\r\n"
+                    );
+                    let install_txt = SHIFT_JIS.encode(&install_txt).0;
+                    install::zip_dir(
+                        &dir,
+                        &dest,
+                        &format!("{name}/"),
+                        &[("install.txt", &install_txt)],
+                        true,
+                    )?;
+                    Ok(install::InstallResult::Package(dest))
+                }));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn end(&mut self, ui: &mut Ui) -> PageResult {
+        ui.heading("お疲れ様でした！");
+        ui.separator();
+        ui.label("これではじめてのUTAUガイドの終了です！単独音の音源が完成しました！");
+        ui.label("他にも連続音、VCCV等のボイスバンクの種類がありますので次はそちらを試す事をおすすめします！");
+        ui.label("連続音のバージョンも鋭意製作中です！お楽しみに！");
+        ui.label(
+            "下記のボタンを押すとファイルの自動片付けを行います。全て終わった後に押してください。",
+        );
+        if ui.button("終了する").clicked() {
+            let dir = &self.state.data_dir;
+            fs::remove_dir_all(dir.join("recstar")).unwrap_or_else(|_| {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title(":(")
+                    .set_description("RecStarの削除に失敗しました。手動で削除してください。")
+                    .show();
+            });
+            fs::remove_dir_all(dir.join("vlabeler")).unwrap_or_else(|_| {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title(":(")
+                    .set_description("vLabelerの削除に失敗しました。手動で削除してください。")
+                    .show();
+            });
+            fs::remove_dir_all(dir.join("hello-utau-world")).unwrap_or_else(|_| {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title(":(")
+                    .set_description(
+                        "Hello UTAU Worldの削除に失敗しました。手動で削除してください。",
+                    )
+                    .show();
+            });
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Info)
+                .set_title("お疲れ様でした！")
+                .set_description("ファイルを削除しました。良いUTAUライフを！")
+                .show();
+            process::exit(0)
+        }
+        Ok(())
     }
 
     fn huw_dir(&self) -> PathBuf {

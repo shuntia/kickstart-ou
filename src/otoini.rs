@@ -1,7 +1,6 @@
 use std::{
     env,
     fs::{self, File},
-    io,
     path::Path,
     thread,
     time::Duration,
@@ -9,7 +8,9 @@ use std::{
 
 use crate::{
     BoxError,
-    install::{InstallResult, Progress, download_with_progress, extract_zip, set_progress},
+    install::{
+        InstallResult, Progress, download_with_progress, extract_zip, set_progress, zip_dir,
+    },
 };
 
 /// Send `req`, returning the JSON body or the server's `{error}` message.
@@ -38,7 +39,7 @@ pub fn run(
 
     set_progress(progress, "収録データを圧縮しています...", None);
     let upload = env::temp_dir().join("otoini-upload.zip");
-    zip_dir(session, &upload)?;
+    zip_dir(session, &upload, "", &[], false)?;
 
     set_progress(progress, "otoiniにアップロードしています...", None);
     let form = reqwest::blocking::multipart::Form::new()
@@ -87,24 +88,4 @@ pub fn run(
     extract_zip(File::open(&result)?, dest, progress)?;
     let _ = fs::remove_file(&result);
     Ok(InstallResult::Oto(dest.to_path_buf()))
-}
-
-/// Zip every file under `src` (paths relative to `src`) into `dest`.
-fn zip_dir(src: &Path, dest: &Path) -> Result<(), BoxError> {
-    let mut zip = zip::ZipWriter::new(File::create(dest)?);
-    let mut stack = vec![src.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let name = path.strip_prefix(src)?.to_string_lossy().replace('\\', "/");
-            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
-            io::copy(&mut File::open(&path)?, &mut zip)?;
-        }
-    }
-    zip.finish()?;
-    Ok(())
 }

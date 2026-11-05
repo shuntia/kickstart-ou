@@ -1,8 +1,8 @@
 use std::{
     env,
     fs::{self, File},
-    io::{Read, Seek, Write},
-    path::{Path, PathBuf},
+    io::{self, Read, Seek, SeekFrom, Write},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicI8, Ordering},
@@ -18,13 +18,14 @@ pub struct OuInstall {
 }
 
 pub enum InstallResult {
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     OuInstall(OuInstall),
     VlInstall,
     RsInstall,
     #[cfg_attr(not(feature = "include_zip"), allow(dead_code))]
     Huw,
     Oto(PathBuf),
+    Package(PathBuf),
 }
 
 /// A running install thread plus a shared progress handle the UI can poll.
@@ -117,8 +118,163 @@ pub fn extract_zip(
     Ok(())
 }
 
-/// Download a zip and extract it into `dest`, skipping if `dest` already exists.
-fn spawn_zip_setup(
+/// Zip every file under `src` into `dest`, each entry named `root` + its path relative to `src`.
+/// `extra` entries go at the archive root as-is (e.g. UTAU's install.txt).
+/// With `sjis`, names are stored as Shift_JIS without the UTF-8 flag, which UTAU reads as-is.
+pub fn zip_dir(
+    src: &Path,
+    dest: &Path,
+    root: &str,
+    extra: &[(&str, &[u8])],
+    sjis: bool,
+) -> Result<(), BoxError> {
+    let encode = |name: String| -> Result<Vec<u8>, BoxError> {
+        if !sjis {
+            return Ok(name.into_bytes());
+        }
+        let (bytes, _, unmappable) = encoding_rs::SHIFT_JIS.encode(&name);
+        if unmappable {
+            return Err(
+                format!("Shift_JISで表せない文字がファイル名に含まれています: {name}").into(),
+            );
+        }
+        Ok(bytes.into_owned())
+    };
+    let options = zip::write::SimpleFileOptions::default();
+    let mut zip = zip::ZipWriter::new(File::create(dest)?);
+    // `dest` may sit inside `src`; don't archive the archive.
+    let dest_abs = fs::canonicalize(dest)?;
+    for (name, data) in extra {
+        zip.start_file_with_options(options.name(&encode(name.to_string())?))?;
+        zip.write_all(data)?;
+    }
+    let mut stack = vec![src.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if fs::canonicalize(&path)? == dest_abs {
+                continue;
+            }
+            let rel = path.strip_prefix(src)?.to_string_lossy().replace('\\', "/");
+            zip.start_file_with_options(options.name(&encode(format!("{root}{rel}"))?))?;
+            io::copy(&mut File::open(&path)?, &mut zip)?;
+        }
+    }
+    zip.finish()?;
+    if sjis {
+        clear_utf8_flags(dest)?;
+    }
+    Ok(())
+}
+
+/// The zip crate sets the UTF-8 flag (bit 11) on any name whose bytes happen to be valid UTF-8,
+/// which some Shift_JIS names are. Clear it in every local and central header so readers fall
+/// back to the system codepage. CRCs and sizes don't cover the flags, so this is safe.
+fn clear_utf8_flags(path: &Path) -> Result<(), BoxError> {
+    let mut f = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let offsets = {
+        let mut archive = zip::ZipArchive::new(&mut f)?;
+        (0..archive.len())
+            .map(|i| {
+                let e = archive.by_index_raw(i)?;
+                Ok([e.header_start() + 6, e.central_header_start() + 8])
+            })
+            .collect::<Result<Vec<_>, zip::result::ZipError>>()?
+    };
+    for pos in offsets.into_iter().flatten() {
+        let mut b = [0u8; 2];
+        f.seek(SeekFrom::Start(pos))?;
+        f.read_exact(&mut b)?;
+        f.seek(SeekFrom::Start(pos))?;
+        f.write_all(&(u16::from_le_bytes(b) & !0x0800).to_le_bytes())?;
+    }
+    Ok(())
+}
+
+/// Host architecture as the suffix used by OpenUtau / .NET downloads.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn arch() -> Result<&'static str, BoxError> {
+    match env::consts::ARCH {
+        "x86_64" => Ok("x64"),
+        "aarch64" => Ok("arm64"),
+        "x86" => Ok("x86"),
+        other => Err(format!("未対応のアーキテクチャです: {other}").into()),
+    }
+}
+
+/// Path to an app's executable inside the folder `app_setup` unpacked it into.
+pub fn app_exe(dir: &Path, name: &str) -> PathBuf {
+    if cfg!(windows) {
+        dir.join(format!("{name}.exe"))
+    } else {
+        dir.join("bin").join(name)
+    }
+}
+
+/// Unpack a .deb's payload into `dest`, dropping the `./opt/<app>/` prefix the
+/// jpackage builds install under.
+fn extract_deb(deb: &Path, dest: &Path, progress: &Progress) -> Result<(), BoxError> {
+    let mut archive = ar::Archive::new(File::open(deb)?);
+    while let Some(entry) = archive.next_entry() {
+        let entry = entry?;
+        if entry.header().identifier() != b"data.tar.zst" {
+            continue;
+        }
+        let total = entry.header().size();
+        let reader = CountingReader {
+            inner: entry,
+            read: 0,
+            total,
+            progress,
+        };
+        let mut tar = tar::Archive::new(zstd::Decoder::new(reader)?);
+        for file in tar.entries()? {
+            let mut file = file?;
+            let path = file.path()?.into_owned();
+            let rel: PathBuf = path
+                .components()
+                .filter(|c| *c != Component::CurDir)
+                .skip(2)
+                .collect();
+            if rel.as_os_str().is_empty()
+                || rel.components().any(|c| !matches!(c, Component::Normal(_)))
+            {
+                continue;
+            }
+            let out = dest.join(rel);
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            file.unpack(&out)?;
+        }
+        return Ok(());
+    }
+    Err(".debにdata.tar.zstが見つかりませんでした。".into())
+}
+
+/// Reports how far through the compressed stream extraction has read.
+struct CountingReader<'a, R> {
+    inner: R,
+    read: u64,
+    total: u64,
+    progress: &'a Progress,
+}
+
+impl<R: Read> Read for CountingReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        set_fraction(self.progress, Some(self.read as f32 / self.total as f32));
+        Ok(n)
+    }
+}
+
+/// Download `url` and unpack it into `dest`, skipping if `dest` already exists.
+fn app_setup(
     name: &'static str,
     url: &'static str,
     dest: PathBuf,
@@ -128,36 +284,95 @@ fn spawn_zip_setup(
         if dest.exists() {
             return Ok(done);
         }
-        let zip_path = env::temp_dir().join(format!("{name}.zip"));
+        let archive = env::temp_dir().join(url.rsplit('/').next().unwrap_or(name));
         download_with_progress(
             url,
-            &zip_path,
+            &archive,
             progress,
             &format!("{name}をダウンロードしています..."),
         )?;
         set_progress(progress, &format!("{name}を展開しています..."), None);
-        extract_zip(File::open(&zip_path)?, &dest, progress)?;
-        let _ = fs::remove_file(&zip_path);
-        Ok(done)
+        let result = if url.ends_with(".deb") {
+            extract_deb(&archive, &dest, progress)
+        } else {
+            extract_zip(File::open(&archive)?, &dest, progress)
+        };
+        let _ = fs::remove_file(&archive);
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&dest);
+        }
+        result.map(|()| done)
     })
 }
 
 pub fn recstar_setup(data_dir: &Path) -> InstallJob {
-    spawn_zip_setup(
+    app_setup(
         "RecStar",
-        "https://github.com/sdercolin/recstar/releases/download/1.2.0/recstar-1.2.0-win64.zip",
+        if cfg!(windows) {
+            "https://github.com/sdercolin/recstar/releases/download/1.2.0/recstar-1.2.0-win64.zip"
+        } else {
+            "https://github.com/sdercolin/recstar/releases/download/1.2.0/recstar-1.2.0-amd64.deb"
+        },
         data_dir.join("recstar"),
         InstallResult::RsInstall,
     )
 }
 
 pub fn vlabeler_setup(data_dir: &Path) -> InstallJob {
-    spawn_zip_setup(
+    app_setup(
         "vLabeler",
-        "https://github.com/sdercolin/vlabeler/releases/download/1.5.0/vlabeler-1.5.0-win64.zip",
+        if cfg!(windows) {
+            "https://github.com/sdercolin/vlabeler/releases/download/1.5.0/vlabeler-1.5.0-win64.zip"
+        } else {
+            "https://github.com/sdercolin/vlabeler/releases/download/1.5.0/vlabeler-1.5.0-amd64.deb"
+        },
         data_dir.join("vlabeler"),
         InstallResult::VlInstall,
     )
+}
+
+#[cfg(target_os = "linux")]
+pub use linux::portable_install;
+#[cfg(windows)]
+pub use win::portable_install;
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+
+    use super::{InstallJob, InstallResult, OuInstall, arch, download_with_progress, spawn_job};
+
+    /// Download the OpenUtau AppImage into `dest` and add a desktop entry.
+    pub fn portable_install(dest: PathBuf) -> InstallJob {
+        spawn_job(move |progress| {
+            fs::create_dir_all(&dest)?;
+            let exe = dest.join("OpenUtau.AppImage");
+            let url = format!(
+                "https://github.com/openutau/OpenUtau/releases/latest/download/OpenUtau-linux-{}.AppImage",
+                arch()?
+            );
+            download_with_progress(&url, &exe, progress, "OpenUtauをダウンロードしています...")?;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755))?;
+
+            let data = dirs::data_dir().ok_or("データフォルダの場所を特定できませんでした。")?;
+            let apps = data.join("applications");
+            fs::create_dir_all(&apps)?;
+            fs::write(
+                apps.join("OpenUtau.desktop"),
+                format!(
+                    "[Desktop Entry]\nType=Application\nName=OpenUtau\nExec=\"{}\"\nCategories=AudioVideo;Audio;\n",
+                    exe.display()
+                ),
+            )?;
+
+            let singer_dir = data.join("OpenUtau").join("Singers");
+            fs::create_dir_all(&singer_dir)?;
+            Ok(InstallResult::OuInstall(OuInstall {
+                install_dir: dest,
+                singer_dir,
+            }))
+        })
+    }
 }
 
 #[cfg(windows)]
@@ -170,20 +385,10 @@ pub mod win {
     };
 
     use super::{
-        InstallJob, InstallResult, OuInstall, Progress, download_with_progress, extract_zip,
+        InstallJob, InstallResult, OuInstall, Progress, arch, download_with_progress, extract_zip,
         set_progress, spawn_job,
     };
     use crate::BoxError;
-
-    /// Host architecture as the suffix used by OpenUtau / .NET downloads.
-    fn arch() -> Result<&'static str, BoxError> {
-        match env::consts::ARCH {
-            "x86_64" => Ok("x64"),
-            "aarch64" => Ok("arm64"),
-            "x86" => Ok("x86"),
-            other => Err(format!("未対応のアーキテクチャです: {other}").into()),
-        }
-    }
 
     fn start_menu_programs_dir() -> PathBuf {
         PathBuf::from(env::var("APPDATA").unwrap_or_default())
