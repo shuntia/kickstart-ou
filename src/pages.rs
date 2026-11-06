@@ -696,6 +696,13 @@ impl Kickstart {
         ui.heading("お疲れ様でした！");
         ui.separator();
         ui.label("これではじめてのUTAUガイドの終了です！単独音の音源が完成しました！");
+        ui.label("先ほど描き出したzipファイルをそのまま配布して大丈夫です！");
+        if let Some(ref p) = self.state.proj_dir {
+            ui.label(format!(
+                "もとの収録ファイルは{}に保存されています。",
+                p.display()
+            ));
+        }
         ui.label("他にも連続音、VCCV等のボイスバンクの種類がありますので次はそちらを試す事をおすすめします！");
         ui.label("連続音のバージョンも鋭意製作中です！お楽しみに！");
         ui.label(
@@ -703,7 +710,7 @@ impl Kickstart {
         );
         if ui.button("終了する").clicked() {
             // Only what this app can download or unpack again; the voicebank stays.
-            let failed: Vec<_> = ["recstar", "vlabeler", "hello-utau-world"]
+            let mut failed: Vec<_> = ["recstar", "vlabeler", "hello-utau-world"]
                 .into_iter()
                 .map(|d| self.state.data_dir.join(d))
                 .filter(|d| {
@@ -711,6 +718,15 @@ impl Kickstart {
                 })
                 .map(|d| d.display().to_string())
                 .collect();
+            if fs::remove_file(self.state.data_dir.join("state.json")).is_err() {
+                failed.push(
+                    self.state
+                        .data_dir
+                        .join("state.json")
+                        .to_string_lossy()
+                        .into(),
+                );
+            }
             for f in ["otoini-upload.zip", "otoini-result.zip"] {
                 let _ = fs::remove_file(std::env::temp_dir().join(f));
             }
