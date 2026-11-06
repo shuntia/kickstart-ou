@@ -205,7 +205,7 @@ impl Default for KickstartData {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("kickstart"),
             page: 0,
-            use_openutau_installer: true,
+            use_openutau_installer: false,
             ou_dir: None,
             ou_singer_dir: None,
             rs_installed: false,
