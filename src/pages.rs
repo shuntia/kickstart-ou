@@ -76,12 +76,8 @@ impl Kickstart {
         #[cfg(windows)]
         {
             ui.label("このソフトは全て管理して最小限で自動インストールすることができますが、OpenUtau公式のインストーラを使用しますか？");
-            ui.radio_value(
-                &mut self.state.use_openutau_installer,
-                false,
-                "いいえ(推奨)",
-            );
-            ui.radio_value(&mut self.state.use_openutau_installer, true, "はい");
+            ui.radio_value(&mut self.state.use_openutau_installer, true, "いいえ(推奨)");
+            ui.radio_value(&mut self.state.use_openutau_installer, false, "はい");
         }
 
         // poll_jobs shows progress while installing.
