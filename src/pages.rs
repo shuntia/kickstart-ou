@@ -188,7 +188,7 @@ impl Kickstart {
         if self.huw_job.is_some() {
             return Ok(());
         }
-        let dest = self.huw_dir();
+        let dest = self.state.data_dir.clone();
         if dest.exists() {
             ui.label(format!(
                 "Hello UTAU Worldは解凍済みです。次に進んでください: {}",
@@ -204,7 +204,7 @@ impl Kickstart {
                 let reader = std::io::Cursor::new(HELLO_UTAU_ZIP);
                 if let Err(e) = install::extract_zip(reader, &dest, progress) {
                     // Remove the partial folder so the button reappears for a retry.
-                    let _ = fs::remove_dir_all(&dest);
+                    let _ = fs::remove_dir_all(&dest.join("Hello UTAU World!"));
                     return Err(format!("Hello UTAU Worldの解凍に失敗しました: {e}").into());
                 }
                 Ok(install::InstallResult::Huw)
@@ -767,7 +767,7 @@ impl Kickstart {
     }
 
     fn huw_dir(&self) -> PathBuf {
-        self.state.data_dir.join("hello-utau-world")
+        self.state.data_dir.join("Hello UTAU World!")
     }
 }
 
