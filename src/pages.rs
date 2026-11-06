@@ -290,7 +290,7 @@ impl Kickstart {
         match self.recstar_state {
             RsState::Waiting => {
                 self.recstar_state = if let Some(s) = recstar_entries() {
-                    RsState::Listed(s)
+                    RsState::Listed(s, None)
                 } else {
                     RsState::Failed("RecStarから取得したフォルダの自動取得に失敗しました".into())
                 };
@@ -304,25 +304,40 @@ impl Kickstart {
                     self.recstar_state = RsState::Selected(path);
                 }
             }
-            RsState::Listed(ref l) => {
-                ui.label("RecStarのセッションフォルダを選択してください。");
-                for i in l {
+            RsState::Listed(ref l, ref picked) => {
+                let mut next = None;
+                if l.is_empty() {
+                    ui.label("RecStarのセッションが見つかりませんでした。");
+                } else {
+                    ui.label("RecStarのセッションフォルダを選択してください。");
+                    for i in l {
+                        if ui
+                            .radio(picked.as_ref() == Some(i), i.display().to_string())
+                            .clicked()
+                        {
+                            next = Some(RsState::Listed(l.clone(), Some(i.clone())));
+                        }
+                    }
+                }
+                ui.horizontal(|ui| {
                     if ui
-                        .radio(
-                            if let RsState::Selected(ref p) = self.recstar_state
-                                && p == i
-                            {
-                                true
-                            } else {
-                                false
-                            },
-                            i.display().to_string(),
+                        .add_enabled(
+                            picked.is_some(),
+                            egui::Button::new("このセッションを移動する"),
                         )
                         .clicked()
+                        && let Some(p) = picked
                     {
-                        self.recstar_state = RsState::Selected(i.clone());
-                        break;
+                        next = Some(RsState::Selected(p.clone()));
                     }
+                    if ui.button("別のフォルダを選択").clicked()
+                        && let Some(path) = rfd::FileDialog::new().pick_folder()
+                    {
+                        next = Some(RsState::Selected(path));
+                    }
+                });
+                if let Some(next) = next {
+                    self.recstar_state = next;
                 }
             }
             RsState::Selected(ref p) => {
@@ -584,6 +599,18 @@ impl Kickstart {
             }
             let dest = ou_dir.join(name);
             if dest.exists() {
+                let ok = rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("上書きの確認")
+                    .set_description(format!(
+                        "{}は既に存在します。削除して上書きしますか？",
+                        dest.display()
+                    ))
+                    .set_buttons(rfd::MessageButtons::OkCancel)
+                    .show();
+                if ok != rfd::MessageDialogResult::Ok {
+                    return Ok(());
+                }
                 fs::remove_dir_all(&dest)?;
             }
             copy_dir_all(dir, &dest)?;
@@ -679,34 +706,45 @@ impl Kickstart {
             "下記のボタンを押すとファイルの自動片付けを行います。全て終わった後に押してください。",
         );
         if ui.button("終了する").clicked() {
-            let dir = &self.state.data_dir;
-            fs::remove_dir_all(dir.join("recstar")).unwrap_or_else(|_| {
-                rfd::MessageDialog::new()
-                    .set_level(rfd::MessageLevel::Error)
-                    .set_title(":(")
-                    .set_description("RecStarの削除に失敗しました。手動で削除してください。")
-                    .show();
-            });
-            fs::remove_dir_all(dir.join("vlabeler")).unwrap_or_else(|_| {
-                rfd::MessageDialog::new()
-                    .set_level(rfd::MessageLevel::Error)
-                    .set_title(":(")
-                    .set_description("vLabelerの削除に失敗しました。手動で削除してください。")
-                    .show();
-            });
-            fs::remove_dir_all(dir.join("hello-utau-world")).unwrap_or_else(|_| {
-                rfd::MessageDialog::new()
-                    .set_level(rfd::MessageLevel::Error)
-                    .set_title(":(")
-                    .set_description(
-                        "Hello UTAU Worldの削除に失敗しました。手動で削除してください。",
-                    )
-                    .show();
-            });
+            // Only what this app can download or unpack again; the voicebank stays.
+            let failed: Vec<_> = ["recstar", "vlabeler", "hello-utau-world"]
+                .into_iter()
+                .map(|d| self.state.data_dir.join(d))
+                .filter(|d| {
+                    fs::remove_dir_all(d).is_err_and(|e| e.kind() != io::ErrorKind::NotFound)
+                })
+                .map(|d| d.display().to_string())
+                .collect();
+            for f in ["otoini-upload.zip", "otoini-result.zip"] {
+                let _ = fs::remove_file(std::env::temp_dir().join(f));
+            }
+            self.state.rs_installed = false;
+            self.state.vl_installed = false;
+            self.save_state();
+            let voicebank = self
+                .state
+                .proj_dir
+                .as_ref()
+                .map(|p| format!("\n音源の場所: {}", p.display()))
+                .unwrap_or_default();
+            let (level, msg) = if failed.is_empty() {
+                (
+                    rfd::MessageLevel::Info,
+                    format!("片付けが完了しました。良いUTAUライフを！{voicebank}"),
+                )
+            } else {
+                (
+                    rfd::MessageLevel::Warning,
+                    format!(
+                        "次のフォルダを削除できませんでした。手動で削除してください:\n{}{voicebank}",
+                        failed.join("\n")
+                    ),
+                )
+            };
             rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Info)
+                .set_level(level)
                 .set_title("お疲れ様でした！")
-                .set_description("ファイルを削除しました。良いUTAUライフを！")
+                .set_description(msg)
                 .show();
             process::exit(0)
         }

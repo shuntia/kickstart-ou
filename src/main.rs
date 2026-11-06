@@ -1,3 +1,6 @@
+// No console window behind the GUI on Windows release builds.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod install;
 mod otoini;
 mod pages;
@@ -62,7 +65,8 @@ pub struct Kickstart {
 
 #[derive(Default, PartialEq)]
 enum RsState {
-    Listed(Vec<PathBuf>),
+    /// Sessions found, plus the one the user has picked but not yet moved.
+    Listed(Vec<PathBuf>, Option<PathBuf>),
     Failed(String),
     Selected(PathBuf),
     Moved(PathBuf),
@@ -71,6 +75,7 @@ enum RsState {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 struct PackageData {
     readme: String,
     name: String,
@@ -175,6 +180,7 @@ impl From<PackageData> for CharacterYaml {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 struct KickstartData {
     installed_to_ou: bool,
     proj_dir: Option<PathBuf>,
@@ -279,6 +285,15 @@ impl Kickstart {
             save_path,
             state,
             ..Default::default()
+        }
+    }
+
+    fn save_state(&self) {
+        if let Some(parent) = self.save_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.state) {
+            let _ = std::fs::write(&self.save_path, json);
         }
     }
 
@@ -420,12 +435,7 @@ impl App for Kickstart {
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        if let Some(parent) = self.save_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&self.state) {
-            let _ = std::fs::write(&self.save_path, json);
-        }
+        self.save_state();
     }
 
     fn auto_save_interval(&self) -> Duration {
