@@ -736,7 +736,6 @@ impl Kickstart {
             }
             self.state.rs_installed = false;
             self.state.vl_installed = false;
-            self.save_state();
             let voicebank = self
                 .state
                 .proj_dir
@@ -752,7 +751,7 @@ impl Kickstart {
                 (
                     rfd::MessageLevel::Warning,
                     format!(
-                        "次のフォルダを削除できませんでした。手動で削除してください:\n{}{voicebank}",
+                        "次のファイル及びフォルダを削除できませんでした。手動で削除してください:\n{}{voicebank}",
                         failed.join("\n")
                     ),
                 )
