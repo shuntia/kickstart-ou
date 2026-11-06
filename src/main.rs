@@ -22,7 +22,7 @@ use pages::PAGES;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-const KICKSTART_OTO_TOKEN: Option<&str> = option_env!("KICKSTART_OTO_TOKEN");
+const OTOINI_TOKEN: Option<&str> = option_env!("OTOINI_TOKEN");
 const DISPLAY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() {
@@ -203,7 +203,7 @@ impl Default for KickstartData {
             proj_dir: None,
             data_dir: home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".kickstart"),
+                .join("kickstart"),
             page: 0,
             use_openutau_installer: true,
             ou_dir: None,
@@ -211,7 +211,7 @@ impl Default for KickstartData {
             rs_installed: false,
             vl_installed: false,
             otoini_url: "https://otoini.shuntia.net".into(),
-            otoini_token: KICKSTART_OTO_TOKEN.unwrap_or_default().into(),
+            otoini_token: OTOINI_TOKEN.unwrap_or_default().into(),
             oto_result_dir: None,
             package_data: PackageData::default(),
             installed_to_ou: false,
@@ -402,12 +402,11 @@ impl App for Kickstart {
                         self.state.prev();
                     }
                 });
-                columns[1].with_layout(
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        ui.label(format!("ページ {}/{}", self.state.page + 1, PAGES.len()));
-                    },
-                );
+                // Not `centered_and_justified`: justify fills the panel's remembered
+                // height, so the bar would never shrink back after a message.
+                columns[1].vertical_centered(|ui| {
+                    ui.label(format!("ページ {}/{}", self.state.page + 1, PAGES.len()));
+                });
                 columns[2].with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                     let next = ui.add_enabled_ui(self.state.page != PAGES.len() as u32 - 1, |ui| {
                         ui.button("次へ")
