@@ -423,13 +423,15 @@ impl App for Kickstart {
                 ..Default::default()
             })
             .show(ui, |ui| {
-                if let Some((_, page_fn)) = PAGES.get(self.state.page as usize) {
-                    if let Err(e) = page_fn(self, ui) {
-                        self.install_error = Some((e.to_string(), Instant::now()));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if let Some((_, page_fn)) = PAGES.get(self.state.page as usize) {
+                        if let Err(e) = page_fn(self, ui) {
+                            self.install_error = Some((e.to_string(), Instant::now()));
+                        }
+                    } else {
+                        ui.label("不明なページです。");
                     }
-                } else {
-                    ui.label("不明なページです。");
-                }
+                });
             });
     }
 
