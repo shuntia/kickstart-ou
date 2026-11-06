@@ -41,7 +41,7 @@ pub const PAGES: &[(&str, PageFn)] = &[
 
 impl Kickstart {
     fn intro(&mut self, ui: &mut Ui) -> PageResult {
-        ui.heading("このソフトは自動でUTAUのボイスバンクを作る補助をするソフトです。\n基本的にはUTAU音源制作Wikiの内情に沿っています。早速右下の「次へ」をクリックして進みましょう！");
+        ui.heading("このソフトは自動でUTAUのボイスバンクを作る補助をするソフトです。\n基本的にはUTAU音源制作Wikiの内容に沿っています。早速右下の「次へ」をクリックして進みましょう！");
         ui.hyperlink_to(
             "参考：UTAU音源制作Wikiの元記事",
             "https://w.atwiki.jp/vbmaker/pages/43.html",
